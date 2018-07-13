@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_todos/core.dart';
+import 'package:flutter_todos/core/exceptions.dart';
+import 'package:flutter_todos/core/reflection.dart';
+import 'package:flutter_todos/core/repository.dart';
 import 'package:flutter_todos/di.dart';
+import 'package:flutter_todos/core/share_prefs.dart';
 import 'package:flutter_todos/todo.dart';
 import 'package:meta/meta.dart';
 import 'package:uuid/uuid.dart';
-import "package:flutter_todos/utils.dart" as Utils;
+import "package:flutter_todos/core/utils.dart" as Utils;
 import "package:flutter_todos/strings.dart" as Strings;
-
+@EnableReflection
 class User implements Entity<String>{
   @override
   String id;
@@ -17,7 +20,6 @@ class User implements Entity<String>{
   String lastName;
   List<Role> roles;
   DateTime created;
-
 
   User(this.id, this.email, this.password, this.firstName, this.lastName,
       this.roles, this.created);
@@ -76,6 +78,11 @@ abstract class UserService{
   User fetchUserByEmail(String email);
   validateLoginInform(LoginInform inform);
   validateSignUpInform(SignUpInform inform);
+  saveLoggedUser(User user);
+  ///return logged user information
+  ///throw a [NonLoggedUserException] exception
+  User fetchLoggedUser();
+  removeLoggedUser();
 }
 abstract class SignUpForm{
   requestSignUp();
@@ -92,10 +99,12 @@ abstract class LoginForm{
   showMessage(String message);
   showError(String error);
   forwardToTodoManagementForm(User user);
+  validateLoggedUser();
 }
 
 class UserServiceImpl implements UserService{
-  Repository<User, String> repository;
+  BaseRepository<User, String> repository;
+  static const CURRENT_USER_KEY = "current-user-key";
 
   UserServiceImpl(){
     repository = new InMemoryRepository();
@@ -104,15 +113,17 @@ class UserServiceImpl implements UserService{
 
   @override
   User fetchUserByEmail(String email) {
-    return repository.searchFirst((user){
-      return user.email == email;
-    });
+    return repository.searchFirst(SearchConditions({
+      "email": email
+    }));
   }
 
   @override
   User login(LoginInform inform) {
     validateLoginInform(inform);
-    return fetchUserByEmail(inform.email);
+    User user = fetchUserByEmail(inform.email);
+    saveLoggedUser(user);
+    return user;
   }
 
   @override
@@ -138,12 +149,34 @@ class UserServiceImpl implements UserService{
   @override
   validateSignUpInform(SignUpInform inform) {
     try{
-      repository.searchFirst((user){
-        return inform.email == user.email;
-      });
+      repository.searchFirst(SearchConditions({
+        "email": inform.email
+      }));
       throw SignUpInformInvalidException("Tài khoản đã tồn tại.");
     }
-    on EntityNonExistingException catch(_){}
+    on NotFoundException catch(_){}
+  }
+
+  @override
+  User fetchLoggedUser() {
+    try {
+      var email = SharePrefsService.getItem(CURRENT_USER_KEY);
+      return fetchUserByEmail(email);
+    }
+    on BaseException catch(exception){
+      print(exception.message);
+      throw NonLoggedUserException("Không có dữ liệu đăng nhập.");
+    }
+  }
+
+  @override
+  saveLoggedUser(User user) {
+    SharePrefsService.setItem(CURRENT_USER_KEY, user.email);
+  }
+
+  @override
+  removeLoggedUser() {
+    SharePrefsService.removeItem(CURRENT_USER_KEY);
   }
 }
 
@@ -164,7 +197,7 @@ class _LoginFormState extends State<LoginFormWidget> implements LoginForm{
   @override
   void initState() {
     super.initState();
-
+    validateLoggedUser();
   }
   @override
   LoginInform fetchLoginInform() {
@@ -176,13 +209,24 @@ class _LoginFormState extends State<LoginFormWidget> implements LoginForm{
 
   @override
   forwardToTodoManagementForm(User user) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context){
-          return TodoManagementFormWidget(user);
-        }
-      )
+    Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+            builder: (context){
+              return TodoManagementFormWidget(user);
+            }
+        )
     );
+  }
+
+  @override
+  validateLoginInform(LoginInform inform) {
+    String message;
+    if(inform.email.isEmpty)
+      message = "Email để trống.";
+    else if(inform.password.isEmpty)
+      message = "Mật khẩu để trống.";
+    if(message != null)
+      throw LoginInformInvalidException(message);
   }
 
   @override
@@ -211,21 +255,13 @@ class _LoginFormState extends State<LoginFormWidget> implements LoginForm{
     Utils.showMessage(context, "Thông báo", message);
   }
 
-  @override
-  validateLoginInform(LoginInform inform) {
-    String message;
-    if(inform.email.isEmpty)
-      message = "Email để trống.";
-    else if(inform.password.isEmpty)
-      message = "Mật khẩu để trống.";
-    if(message != null)
-      throw LoginInformInvalidException(message);
-  }
 
   @override
   Widget build(BuildContext context) {
+
     return Scaffold(
-      body: Center(
+      body: Container(
+        margin: EdgeInsets.all(8.0),
         child: ListView(
           children: <Widget>[
             Image(
@@ -245,24 +281,24 @@ class _LoginFormState extends State<LoginFormWidget> implements LoginForm{
               ),
               obscureText: true,
             ),
-            Center(
-              child: RaisedButton(
-                color: Theme.of(context).primaryColor,
-                textColor: Colors.white,
-                child: Text(Strings.loginLabel),
-                onPressed: requestLogin,
+            Padding(
+              padding: const EdgeInsets.only(top: 16.0, bottom: 4.0),
+              child: Center(
+                child: RaisedButton(
+                  color: Theme.of(context).primaryColor,
+                  textColor: Colors.white,
+                  child: Text(Strings.loginLabel),
+                  onPressed: requestLogin,
+                ),
               ),
             ),
             Row(
               mainAxisSize: MainAxisSize.min,
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
-                Container(
-                  margin: EdgeInsets.only(right: 4.0),
-                  child: FlatButton(
-                    child: Text(Strings.signUpLabel),
-                    onPressed: forwardToSignUpForm,
-                  ),
+                FlatButton(
+                  child: Text(Strings.signUpLabel),
+                  onPressed: forwardToSignUpForm,
                 ),
                 FlatButton(
                   child: Text(Strings.forgotPasswordLabel),
@@ -289,6 +325,18 @@ class _LoginFormState extends State<LoginFormWidget> implements LoginForm{
   void forwardToForgetPasswordForm() {
     showError("Tính năng này chưa được triển khai.");
   }
+
+  @override
+  validateLoggedUser() async {
+    try{
+      User user = userService.fetchLoggedUser();
+      print("User logged ${user.email}");
+      forwardToTodoManagementForm(user);
+    }
+    on NonLoggedUserException catch(exception){
+      print(exception);
+    }
+  }
 }
 class SignUpFormWidget extends StatefulWidget{
   @override
@@ -301,10 +349,10 @@ class _SignUpFormState extends State<SignUpFormWidget> implements SignUpForm{
   UserService userService;
   _SignUpFormState(){
     userService = ServiceContainer.getUserService();
-    emailController = TextEditingController();
-    passwordController = TextEditingController();
-    firstNameController = TextEditingController();
-    lastNameController = TextEditingController();
+    emailController = TextEditingController(text: "qwe123@gmail.com");
+    passwordController = TextEditingController(text: "12345");
+    firstNameController = TextEditingController(text: "Tho");
+    lastNameController = TextEditingController(text: "Pham");
   }
 
   @override
@@ -324,21 +372,27 @@ class _SignUpFormState extends State<SignUpFormWidget> implements SignUpForm{
 
   @override
   requestSignUp() {
-    SignUpInform inform = fetchSignUpInform();
-    validateSignUpInform(inform);
-    User user = userService.signUp(inform);
-    showMessage("Bạn đã đăng ký thành Công. Bạn sẽ về trang đăng nhập.");
-    backToLoginForm(user);
+    try {
+      SignUpInform inform = fetchSignUpInform();
+      validateSignUpInform(inform);
+      User user = userService.signUp(inform);
+      showMessage("Bạn đã đăng ký thành Công. Bạn sẽ về trang đăng nhập.", () {
+        backToLoginForm(user);
+      });
+    }
+    on BaseException catch(exception){
+      showError(exception.message);
+    }
   }
 
   @override
-  showError(String message) {
-    Utils.showMessage(context, "Lỗi", message);
+  showError(String message, [void accepted()]) {
+    Utils.showMessage(context, "Lỗi", message, accepted);
   }
 
   @override
-  showMessage(String message) {
-    Utils.showMessage(context, "Thông báo", message);
+  showMessage(String message, [void accepted()]) {
+    Utils.showMessage(context, "Thông báo", message, accepted);
   }
 
   @override
@@ -362,7 +416,8 @@ class _SignUpFormState extends State<SignUpFormWidget> implements SignUpForm{
       appBar: AppBar(
         title: Text("Đăng ký tài khoản")
       ),
-      body: Center(
+      body: Container(
+        margin: EdgeInsets.all(8.0),
         child: ListView(
           children: <Widget>[
             TextField(
@@ -404,12 +459,14 @@ class _SignUpFormState extends State<SignUpFormWidget> implements SignUpForm{
               ],
             ),
             Padding(
-              padding: const EdgeInsets.only(top: 4.0),
-              child: RaisedButton(
-                color: Theme.of(context).primaryColor,
-                textColor: Colors.white,
-                child: Text(Strings.signUpLabel),
-                onPressed: requestSignUp,
+              padding: const EdgeInsets.only(top: 8.0),
+              child: Center(
+                child: RaisedButton(
+                  color: Theme.of(context).primaryColor,
+                  textColor: Colors.white,
+                  child: Text(Strings.signUpLabel),
+                  onPressed: requestSignUp,
+                ),
               ),
             )
           ],

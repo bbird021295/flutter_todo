@@ -1,7 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_todos/core/share_prefs.dart';
 import 'package:flutter_todos/user.dart';
 
-void main() => runApp(new MyApp());
+
+void main() async{
+
+  await SharePrefsService.init();
+  runApp(MyApp());
+}
 
 class MyApp extends StatelessWidget {
   // This widget is the root of your application.

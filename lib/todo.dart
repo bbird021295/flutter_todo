@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_todos/core.dart';
+import 'package:flutter_todos/core/exceptions.dart';
+import 'package:flutter_todos/core/reflection.dart';
 import 'package:flutter_todos/di.dart';
+import 'package:flutter_todos/core/repository.dart';
 import 'package:flutter_todos/user.dart';
 import "package:uuid/uuid.dart";
 import "package:english_words/english_words.dart";
-import "package:flutter_todos/utils.dart" as Utils;
+import "package:flutter_todos/core/utils.dart" as Utils;
+import "package:flutter_todos/strings.dart" as Strings;
+@EnableReflection
 class Todo implements Entity<String>{
   @override
   String id;
@@ -49,7 +54,9 @@ abstract class TodoService{
   loadWordDocument(String path);
   searchTodos(User user, String keyword);
   loadTodos(User user);
+  addTodo(Todo todo);
   saveTodo(Todo todo);
+  addTodos(List<Todo> todos);
 }
 ///Xác định chiều order, [ASC] tăng dần hoặc [DES]giảm dần
 enum OrderDirection{
@@ -85,6 +92,23 @@ abstract class TodoDetailForm  implements Form{
 
   TodoDetailForm(this.todo);
   updateButtonClicked();
+}
+abstract class TodoLoadForm implements Form{
+  requestLoadTodos();
+  backToTodoManagementForm();
+  showTodos(List<Todo> todos);
+  forwardToFileExplorer();
+  TodoLoadInform fetchTodoLoadInform();
+  requestSaveTodos();
+}
+abstract class TodoLoaderService{
+  List<Todo> parseTodoLoadInform(TodoLoadInform inform);
+}
+class TodoLoadInform{
+  String content;
+
+  TodoLoadInform(this.content);
+
 }
 
 
@@ -122,10 +146,7 @@ class TodoServiceImpl implements TodoService{
   }
   @override
   loadTodos(User user) {
-    return repository.search((todo){
-      print("User email = ${user.email} vs Todo's creator = ${todo.creator}");
-      return todo.creator == user.email;
-    });
+    return repository.search(SearchConditions({"creator": user.email}));
   }
 
   @override
@@ -134,26 +155,32 @@ class TodoServiceImpl implements TodoService{
   }
 
   @override
-  saveTodo(Todo todo) {
+  addTodo(Todo todo) {
     repository.insert(todo);
   }
 
   @override
   List<Todo> searchTodos(User user, String keyword) {
     keyword = keyword.trim().toLowerCase();
-    return repository.search((todo){
-      return
-        todo.creator == user.email
-        && (
-          todo.title.toLowerCase().contains(keyword)
-          || todo.question.toLowerCase().contains(keyword)
-          || todo.answer.toLowerCase().contains(keyword)
-          || todo.fields.toLowerCase().contains(keyword)
-        );
-    });
+    return repository.search(SearchConditions({
+      "creator": user.email,
+      "title": keyword,
+      "fields": keyword,
+      "question": keyword,
+      "answer": keyword
+    }));
+  }
+
+  @override
+  saveTodo(Todo todo) {
+    repository.update(todo);
+  }
+
+  @override
+  addTodos(List<Todo> todos) {
+    repository.insertAll(todos);
   }
 }
-
 
 class TodoListImpl implements TodoList{
 
@@ -217,13 +244,19 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
 
   @override
   searchButtonClicked() {
-    String keyword = keywordController.text;
-    if(keyword.isEmpty)
-      showError("Từ khóa tìm kiếm rỗng.");
-    else{
-      List<Todo> searchResult = todoService.searchTodos(member, keywordController.text);
-      print("Search completed: size of result = ${searchResult.length}");
-      showTodo(searchResult);
+    try {
+      String keyword = keywordController.text;
+      if (keyword.isEmpty)
+        showError("Từ khóa tìm kiếm rỗng.");
+      else {
+        List<Todo> searchResult = todoService.searchTodos(
+            member, keywordController.text);
+        print("Search completed: size of result = ${searchResult.length}");
+        showTodo(searchResult);
+      }
+    }
+    on NotFoundException catch(exception){
+      showError(exception.message);
     }
   }
 
@@ -258,13 +291,29 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text("Quản lý TODOs")
+        title: Text("Quản lý TODOs"),
+        actions: <Widget>[
+          FlatButton(
+            child: Text("Đăng xuất", style: TextStyle(color: Colors.white),),
+            onPressed: requestLogout,
+          )
+        ],
       ),
       body: RefreshIndicator(
           child: Column(
             children: <Widget>[
               buildSearchBox(),
-              buildAddTodoButton(),
+              Row(
+                mainAxisSize: MainAxisSize.max,
+                children: <Widget>[
+                  Expanded(
+                    child: buildAddTodoButton()
+                  ),
+                  Expanded(
+                    child: buildLoadTodoButton()
+                  )
+                ],
+              ),
               haveTodos() ? buildTodoList() : buildEmptyTodoList()
             ],
           ),
@@ -297,7 +346,7 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
     return RaisedButton(
       child: ListTile(
         leading: Icon(Icons.add),
-        title: Text("Tạo TODO mới"),
+        title: Text("Tạo TODOs"),
       ),
       onPressed: toTodoCreation,
     );
@@ -305,12 +354,13 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
 
   Widget buildEmptyTodoList() {
     return Expanded(
-      flex: 1,
-      child: Center(
-        child: ListTile(
-          leading: Icon(Icons.today),
-          title: Text("Bạn chưa có TODO nào."),
-        ),
+      child: ListView(
+        children: <Widget>[
+          ListTile(
+            leading: Icon(Icons.today),
+            title: Text("Bạn chưa có TODO nào."),
+          )
+        ],
       ),
     );
   }
@@ -327,14 +377,15 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
   }
 
   @override
-  toTodoCreation() {
-    Navigator.of(context).push(
+  toTodoCreation() async{
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context){
           return TodoCreationFormWidget(member);
         }
       )
     );
+    loadAllTodos();
   }
 
   Widget buildFieldsTile(BuildContext context, int position) {
@@ -370,19 +421,60 @@ class _TodoManagementFormState extends State<TodoManagementFormWidget> implement
     );
   }
 
-  toTodoDetail(Todo todo){
-    Navigator.of(context).push(
+  toTodoDetail(Todo todo) async{
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context){
           return TodoDetailFormWidget(member, todo);
         }
       )
     );
+    loadAllTodos();
+
   }
 
   void loadAllTodos() {
-    List<Todo> todos = todoService.loadTodos(member);
-    showTodo(todos);
+    try{
+      List<Todo> todos = todoService.loadTodos(member);
+      showTodo(todos);
+    }
+    on NotFoundException catch(exception){
+      print(exception);
+      showEmptySearchResult();
+    }
+  }
+
+  void requestLogout() {
+    ServiceContainer.getUserService().removeLoggedUser();
+    Utils.showConfirm(context, "Xác nhận", "Bạn thực sự muốn đăng xuất ?", (){
+      Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context){
+            return LoginFormWidget();
+          })
+      );
+    });
+  }
+
+  Widget buildLoadTodoButton() {
+    return Container(
+      margin: const EdgeInsets.only(left: 8.0),
+      child: RaisedButton(
+        child: ListTile(
+          title: Text("tải TODOs"),
+          leading: Icon(Icons.insert_drive_file),
+        ),
+        onPressed: forwardToLoadTodoForm,
+      ),
+    );
+  }
+
+  void forwardToLoadTodoForm() async{
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (context){
+        return TodoLoadFormWidget(member);
+      })
+    );
+    loadAllTodos();
   }
 }
 class TodoCreationFormWidget extends StatefulWidget{
@@ -420,7 +512,7 @@ class _TodoCreationFormState extends State<TodoCreationFormWidget> implements To
           creator: member.email
       );
       validate(todo);
-      todoService.saveTodo(todo);
+      todoService.addTodo(todo);
       clearTextFields();
       showMessage("Bạn đã thêm TODO thành công.");
     }
@@ -465,14 +557,19 @@ class _TodoCreationFormState extends State<TodoCreationFormWidget> implements To
       ),
       body: ListView(
         children: <Widget>[
-          buildTextField(fieldsController, "Lĩnh vực"),
-          buildTextField(titleController, "Tiêu đề"),
-          buildTextField(questionController, "Câu hỏi"),
-          buildTextField(answerController, "Trả lời"),
-          Center(
-            child: RaisedButton(
-              child: Text("Thêm"),
-              onPressed: createButtonClicked,
+          buildTextField(fieldsController, Strings.fieldsLabel),
+          buildTextField(titleController, Strings.titleLabel),
+          buildTextField(questionController, Strings.questionLabel),
+          buildTextField(answerController, Strings.answerLabel),
+          Container(
+            margin: EdgeInsets.only(top: 8.0),
+            child: Center(
+              child: RaisedButton(
+                color: Theme.of(context).primaryColor,
+                textColor: Colors.white,
+                child: Text("Thêm"),
+                onPressed: createButtonClicked,
+              ),
             ),
           ),
         ],
@@ -551,6 +648,9 @@ class _TodoDetailFormState extends State<TodoDetailFormWidget> implements TodoDe
     on InvalidException catch(exception){
       showError(exception.message);
     }
+    on AlreadyExistingException catch(_){
+
+    }
     on BaseException catch(exception){
       showError(exception.message);
     }
@@ -599,36 +699,46 @@ class _TodoDetailFormState extends State<TodoDetailFormWidget> implements TodoDe
             ),
             enabled: false,
           ),
-          buildTextField(fieldsController, "Lĩnh vực"),
-          buildTextField(titleController, "Tiêu đề"),
-          buildTextField(questionController, "Câu hỏi"),
-          buildTextField(answerController, "Trả lời"),
+          buildTextField(fieldsController, Strings.fieldsLabel),
+          buildTextField(titleController, Strings.titleLabel),
+          buildTextField(questionController, Strings.questionLabel),
+          buildTextField(answerController, Strings.answerLabel),
           TextField(
             controller: TextEditingController(text: "${todo.created.day}/${todo.created.month}/${todo.created.year}"),
             decoration: InputDecoration(
-              labelText: "Ngày tạo"
+              labelText: Strings.createdLabel
             ),
             enabled: false,
           ),TextField(
             controller: TextEditingController(text: "${todo.creator}"),
             decoration: InputDecoration(
-              labelText: "Người tạo"
+              labelText: Strings.creatorLabel
             ),
             enabled: false,
           ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              RaisedButton(
-                child: Text("Cập nhật"),
-                onPressed: updateButtonClicked,
-              ),
-              RaisedButton(
-                child: Text("Bỏ qua"),
-                onPressed: refreshForm,
-              )
-            ],
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                Container(
+                  margin: EdgeInsets.only(right: 8.0),
+                  child: RaisedButton(
+                    color: Theme.of(context).primaryColor,
+                    textColor: Colors.white,
+                    child: Text(Strings.updateLabel),
+                    onPressed: updateButtonClicked,
+                  ),
+                ),
+                RaisedButton(
+                  color: Theme.of(context).primaryColor,
+                  textColor: Colors.white,
+                  child: Text(Strings.ignoreLabel),
+                  onPressed: refreshForm,
+                )
+              ],
+            ),
           )
         ],
       ),
@@ -639,6 +749,206 @@ class _TodoDetailFormState extends State<TodoDetailFormWidget> implements TodoDe
       controller: controller,
       decoration: InputDecoration(
         labelText: labelText
+      ),
+    );
+  }
+}
+
+class TodoLoaderServiceImpl implements TodoLoaderService{
+  @override
+  List<Todo> parseTodoLoadInform(TodoLoadInform inform) {
+    String content = inform.content;
+    List<dynamic> todos = json.decode(content);
+    return todos
+        .map((todo){
+          Map<String, dynamic> todoJSON = json.decode(todo);
+          print(todoJSON);
+          return Todo.newInstance(
+              title: todoJSON["title"],
+              fields: todoJSON["fields"],
+              question: todoJSON["question"],
+              answer: todoJSON["answer"],
+              creator: todoJSON["creator"]
+          );
+        }).toList();
+  }
+}
+
+class TodoLoadFormWidget extends StatefulWidget{
+  final User member;
+
+  TodoLoadFormWidget(this.member);
+
+  @override
+  State<StatefulWidget> createState() {
+    return _TodoLoadFormState(member);
+  }
+}
+class _TodoLoadFormState extends State<TodoLoadFormWidget> implements TodoLoadForm{
+  User user;
+  TodoLoaderService todoLoader;
+  TodoService todoService;
+  List<Todo> todos = [];
+  FileContentController fileContentController;
+
+  _TodoLoadFormState(this.user){
+    todoLoader = ServiceContainer.getTodoLoader();
+    todoService = ServiceContainer.getTodoService();
+    fileContentController = FileContentController();
+  }
+
+
+  @override
+  backToTodoManagementForm() {
+    Navigator.of(context).pop();
+  }
+
+  @override
+  TodoLoadInform fetchTodoLoadInform() {
+    String content = fileContentController.text;
+    return TodoLoadInform(content);
+  }
+
+  @override
+  forwardToFileExplorer() {
+    // TODO: implement forwardToFileExplorer
+  }
+
+  @override
+  requestLoadTodos() {
+    try {
+      TodoLoadInform inform = fetchTodoLoadInform();
+      List<Todo> todos = todoLoader.parseTodoLoadInform(inform);
+      showTodos(todos);
+    }
+    on ParseFileContentException catch(exception){
+      showError(exception.message);
+    }
+  }
+
+  @override
+  requestSaveTodos() {
+    try{
+      todoService.addTodos(todos);
+      showMessage("Bạn đã thêm các TODOs thành công. Tổng cộng ${todos.length} TODOs");
+      clearTodos();
+    }
+    on BaseException catch(exception){
+      showError(exception.message);
+    }
+  }
+
+  @override
+  showError(String erMessage) {
+    Utils.showMessage(context, "Lỗi", erMessage);
+  }
+
+  @override
+  showMessage(String message) {
+    Utils.showMessage(context, "Thông báo", message);
+  }
+
+  @override
+  showTodos(List<Todo> todos) {
+    setState(() {
+      this.todos = todos;
+    });
+  }
+
+  void clearTodos() {
+    setState(() {
+      todos = [];
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Tải TODOs từ File")
+      ),
+      body: Container(
+        margin: EdgeInsets.all(8.0),
+        child: Column(
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8.0),
+              child: FileChooser(
+                  title: Text("Lựa chọn file"),
+                  onSelected: requestLoadTodos,
+                  controller: fileContentController
+              ),
+            ),
+            Expanded(
+              child: buildTodoListView(),
+            ),
+            hasTodos() ? Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: RaisedButton(
+                color: Theme.of(context).primaryColor,
+                textColor: Colors.white,
+                child: Text("Thêm tất cả"),
+                onPressed: requestSaveTodos,
+              ),
+            ) : Container()
+          ],
+        )
+      )
+    );
+  }
+
+  Widget buildTodoListView() {
+    return ListView.builder(
+      itemBuilder: (context, position){
+        Todo todo = todos[position];
+        return ListTile(
+            title: Text("${todo.title} - ${todo.created.day}/${todo.created.month}/${todo.created.year}"),
+            subtitle: Text(todo.question),
+        );
+      },
+      itemCount: todos.length,
+    );
+  }
+
+  hasTodos() {
+    return todos.length > 0;
+  }
+}
+class FileContentController{
+  String text;
+
+  FileContentController({this.text});
+
+}
+class FileChooser extends StatelessWidget{
+  final Widget title;
+  final Function() onSelected;
+  final FileContentController controller;
+  FileChooser({this.title, this.onSelected, this.controller}){
+    List<String> todos = [];
+    for(int i =0; i <= 20; i++){
+      todos.add("""{"title":"Fake title $i","fields":"Fake fields $i","question":"Fake question $i","answer":"Fake answer $i","creator":"thopvna@gmail.com"}""");
+    }
+    controller.text = json.encode(todos);
+  }
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          title,
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: RaisedButton(
+              child: Text("Chọn file"),
+              onPressed: (){
+                onSelected();
+              },
+            ),
+          )
+        ],
       ),
     );
   }
